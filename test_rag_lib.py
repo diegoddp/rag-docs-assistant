@@ -40,4 +40,9 @@ def test_montar_contexto_formato():
 #     5.     assert len(docs) == 1
 #     6.     assert docs[0]["fonte"] == "um.md"
 # --- seu código aqui ---
-
+def test_ignora_arquivos_que_nao_sao_md(tmp_path):
+    (tmp_path / "um.md").write_text("conteudo md", encoding="utf-8")      # Arrange
+    (tmp_path / "dois.txt").write_text("conteudo txt", encoding="utf-8")
+    docs = carregar_documentos(tmp_path)                                  # Act
+    assert len(docs) == 1                                                 # Assert
+    assert docs[0]["fonte"] == "um.md"
