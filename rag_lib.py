@@ -1,13 +1,14 @@
 # =====================================================================
 # rag_lib.py — a LÓGICA do assistente RAG (sem FastAPI aqui)
 # =====================================================================
-# Fluxo:  docs/*.md  →  carregar_documentos  →  indexar_chroma  →  [Chroma]
-#         pergunta   →  buscar_chroma  →  montar_contexto  →  chamar_llm  →  resposta + fontes
+# Fluxo v2 (Semana 7):
+#   docs/<categoria>/*.md → carregar_documentos → chunkar_documentos → indexar_chroma → [Chroma]
+#   pergunta (+categoria) → buscar_chroma(k=8, where) → filtrar_por_score → remover_repetidos → [:3]
+#                         → montar_contexto → chamar_llm → resposta + fontes
+#                         (se o funil devolver vazio: "Não encontrei" SEM chamar o LLM)
 #
-# Regra de ouro deste arquivo: NADA de chromadb no topo. O import fica
-# DENTRO de criar_colecao. Motivo: o chromadb puxa numpy, que o ThreatLocker
-# bloqueia no seu PC. Com o import lá dentro, os testes e o resto da lib
-# rodam no venv local; só a parte do banco exige o Docker.
+# Regra de ouro: NADA de chromadb no topo (import dentro de criar_colecao).
+# Assim os testes rodam no venv local mesmo com o numpy bloqueado.
 
 import os
 import math
@@ -16,6 +17,10 @@ import logging
 USAR_MOCK = os.getenv("USAR_MOCK", "true").lower() == "true"
 PASTA_DOCS = os.getenv("PASTA_DOCS", "docs")
 PASTA_DB = os.getenv("PASTA_DB", "chroma_db")
+# Parâmetros do funil (Dia 32), configuráveis por ambiente:
+K_BUSCA = int(os.getenv("K_BUSCA", "8"))               # over-fetch: quantos pedir ao Chroma
+SCORE_MINIMO = float(os.getenv("SCORE_MINIMO", "0.3"))  # corte (no mock quase nada cai; no real 0.3 separa bem)
+TOP_FINAL = int(os.getenv("TOP_FINAL", "3"))           # quantos vão pro contexto
 
 
 # ─────────────────────────────────────────────
@@ -41,67 +46,127 @@ def embedding(texto):
 
 
 # =====================================================================
-# LACUNA 1 — def carregar_documentos(pasta=PASTA_DOCS)   [NOVO — você escreve]
+# LACUNA A — def carregar_documentos(pasta=PASTA_DOCS)   [ADAPTE o seu]
 # =====================================================================
-# Papel: ler TODOS os arquivos .md da pasta e devolver a lista de dicts
-# {"fonte": nome_do_arquivo, "texto": conteudo} — o mesmo formato do
-# DOCUMENTOS fixo dos Dias 28/29, só que agora vindo do disco (Dia 6).
+# Os docs agora ficam em SUBPASTAS, e o nome da subpasta é a CATEGORIA:
+#   docs/conta/senha.md  →  {"fonte": "conta/senha.md", "categoria": "conta", "texto": ...}
+# A estrutura de pastas vira metadata (Dia 33) sem ninguém digitar etiqueta.
+# É um for DENTRO de outro for (Dia 31): o de fora anda nas subpastas, o de
+# dentro nos arquivos de cada uma.
 # Passos:
 #   1. documentos = []
-#   2. for nome in sorted(os.listdir(pasta)):         # os.listdir = lista os nomes dos arquivos da pasta
-#   3.     if not nome.endswith(".md"):                # ignora o que não for .md
-#   4.         continue                                # continue = pula pro próximo item do for
-#   5.     caminho = os.path.join(pasta, nome)         # junta "docs" + "senha.md" → "docs/senha.md"
-#   6.     with open(caminho, encoding="utf-8") as f:
-#   7.         texto = f.read()
-#   8.     documentos.append({"fonte": nome, "texto": texto})
-#   9. return documentos
-# --- seu código aqui ---
+#   2. for categoria in sorted(os.listdir(pasta)):              # "conta", "financeiro", "suporte"
+#   3.     caminho_cat = os.path.join(pasta, categoria)
+#   4.     if not os.path.isdir(caminho_cat):                   # pula o que não for pasta
+#   5.         continue
+#   6.     for nome in sorted(os.listdir(caminho_cat)):
+#   7.         if not nome.endswith(".md"):
+#   8.             continue
+#   9.         with open(os.path.join(caminho_cat, nome), encoding="utf-8") as f:
+#  10.             texto = f.read()
+#  11.         documentos.append({"fonte": f"{categoria}/{nome}", "categoria": categoria, "texto": texto})
+#  12. return documentos
+# --- seu código aqui (substitua a versão antiga) ---
 def carregar_documentos(pasta=PASTA_DOCS):
     documentos = []
-    for nome in sorted(os.listdir(pasta)):
-        if not nome.endswith(".md"):
+    for categoria in sorted(os.listdir(pasta)):
+        caminho_cat = os.path.join(pasta, categoria)
+        if not os.path.isdir(caminho_cat):
             continue
-        caminho = os.path.join(pasta, nome)
-        with open(caminho, encoding="utf-8") as f:
-            texto = f.read()
-        documentos.append({"fonte": nome, "texto": texto})
-    return documentos         
+        for nome in sorted(os.listdir(caminho_cat)):
+            if not nome.endswith(".md"):
+                continue
+            with open(os.path.join(caminho_cat, nome), encoding="utf-8") as f:
+                texto = f.read()
+            documentos.append({"fonte": f"{categoria}/{nome}", "categoria": categoria, "texto": texto})
+    return documentos                
+
 
 # =====================================================================
-# LACUNA 2 — criar_colecao, indexar_chroma, buscar_chroma   [COLE do dia29_chroma.py]
+# LACUNA B — chunk_por_paragrafo + chunkar_documentos   [COLE do dia31_chunking.py]
 # =====================================================================
-# Cole as 3 funções exatamente como você escreveu no Dia 29. Depois faça
-# DUAS trocas pequenas em criar_colecao:
-#   - o import chromadb fica DENTRO da função (leia a regra de ouro lá no topo)
-#   - path="chroma_db"  →  path=PASTA_DB   (a constante lá de cima)
+# Cole as duas como escreveu. UMA adaptação em chunkar_documentos: o dict de
+# saída precisa carregar a categoria também (senão o filtro do Dia 33 não
+# funciona nos pedaços):
+#   saida.append({"fonte": f"{doc['fonte']}#{i}", "categoria": doc["categoria"], "texto": pedaco})
 # --- seu código aqui ---
+def chunk_por_paragrafo(texto):
+    partes = texto.split("\n\n")
+    return [p.strip() for p in partes if p.strip()]
+
+def chunkar_documentos(documentos):
+    saida = []
+    for doc in documentos:
+        pedacos = chunk_por_paragrafo(doc["texto"])
+        for i, pedaco in enumerate(pedacos):
+            saida.append({"fonte": f"{doc['fonte']}#{i}", "categoria": doc["categoria"], "texto": pedaco}
+)
+    return saida    
+
+
+# =====================================================================
+# PRONTO — criar_colecao (Dia 29) com nome NOVO
+# =====================================================================
+# Mudamos o que vai no metadata (agora tem categoria) e o que é um "documento"
+# (agora é um pedaço). A coleção antiga ("ajuda_mock") tem dados no formato
+# velho. Em vez de misturar, criamos uma coleção nova — "ajuda_v2". É o que se
+# faz em banco quando o formato muda: migração, não remendo.
 def criar_colecao():
     import chromadb
     client = chromadb.PersistentClient(path=PASTA_DB)
-    nome = "ajuda_mock" if USAR_MOCK else "ajuda_real"
-    colecao = client.get_or_create_collection(name=nome, metadata={"hnsw:space": "cosine"})
-    return colecao
+    nome = "ajuda_v2_mock" if USAR_MOCK else "ajuda_v2_real"
+    return client.get_or_create_collection(name=nome, metadata={"hnsw:space": "cosine"})
 
+
+# =====================================================================
+# LACUNA C — def indexar_chroma(documentos, colecao)   [ADAPTE o seu — é o Ex1 do Dia 33]
+# =====================================================================
+# Única mudança: o metadata de cada pedaço leva fonte E categoria:
+#   metadatas.append({"fonte": doc["fonte"], "categoria": doc["categoria"]})
+# --- seu código aqui (substitua a versão antiga) ---
 def indexar_chroma(documentos, colecao):
-    ids, textos, vetores, fontes = [], [], [], []
+    ids, textos, vetores, metadatas = [], [], [], []
     for i, doc in enumerate(documentos):
         ids.append(f"doc{i}")
         textos.append(doc["texto"])
         vetores.append(embedding(doc["texto"]))
-        fontes.append({"fonte": doc["fonte"]})   
-    colecao.add(ids=ids, documents=textos, embeddings=vetores, metadatas=fontes)
+        metadatas.append({"fonte": doc["fonte"], "categoria": doc["categoria"]})
+    colecao.add(ids=ids, documents=textos, embeddings=vetores, metadatas=metadatas)
 
 
-def buscar_chroma(pergunta, colecao, k=3):
-    res = colecao.query(query_embeddings=[embedding(pergunta)], n_results=k)
-    textos     = res["documents"][0]
-    metadatas  = res["metadatas"][0]
-    distancias = res["distances"][0]
+# =====================================================================
+# LACUNA D — def buscar_chroma(pergunta, colecao, categoria=None, k=K_BUSCA)   [é o Ex2 do Dia 33]
+# =====================================================================
+# Mudanças em relação ao seu: (1) parâmetro categoria opcional → where;
+# (2) k padrão vira K_BUSCA (over-fetch); (3) o dict de saída leva categoria.
+# Passos: iguais ao buscar_filtrado do Dia 33 — pode colar e renomear.
+# --- seu código aqui (substitua a versão antiga) ---
+def buscar_chroma(pergunta, colecao, categoria=None, k=K_BUSCA):
+    filtro = None
+    if categoria:
+        filtro = {"categoria": categoria}
+    res = colecao.query(query_embeddings=[embedding(pergunta)], n_results=k, where=filtro)
     resultados = []
-    for texto, meta, dist in zip(textos, metadatas, distancias):
-        resultados.append({"fonte": meta["fonte"], "texto": texto, "score": 1 - dist})
+    for texto, meta, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0]):
+        resultados.append({"fonte": meta["fonte"], "categoria": meta["categoria"], "texto": texto, "score": 1 - dist})
     return resultados
+
+# =====================================================================
+# LACUNA E — filtrar_por_score + remover_repetidos   [COLE do dia32_retrieval.py, sem mudar]
+# =====================================================================
+# --- seu código aqui ---
+def filtrar_por_score(resultados, minimo=0.3):
+    return [r for r in resultados if r["score"] >= minimo]
+
+def remover_repetidos(resultados):
+    vistos = []
+    saida = []
+    for r in resultados:
+        if r["texto"] not in vistos:
+            vistos.append(r["texto"])
+            saida.append(r)
+    return saida
+
 
 # ─────────────────────────────────────────────
 # PRONTO — LLM e montagem do contexto (Dias 22, 28)
@@ -137,25 +202,26 @@ def montar_contexto(resultados):
 
 
 # =====================================================================
-# LACUNA 3 — def responder(pergunta, colecao)   [ADAPTE o do Dia 29]
+# LACUNA F — def responder(pergunta, colecao, categoria=None)   [ADAPTE o seu — é o funil do Dia 32]
 # =====================================================================
-# Diferença pro Dia 29: a API precisa devolver a resposta E a lista de fontes
-# consultadas (sem repetir). Então em vez de  return chamar_llm(messages),
-# a função devolve um DICT com duas chaves.
-# Passos:
-#   1. resultados = buscar_chroma(pergunta, colecao)
-#   2. contexto = montar_contexto(resultados)
-#   3. messages = [...]                                  # igual ao Dia 29
-#   4. resposta = chamar_llm(messages)
-#   5. fontes = []
-#   6. for r in resultados:
-#   7.     if r["fonte"] not in fontes:                  # só adiciona se ainda não está na lista
-#   8.         fontes.append(r["fonte"])
-#   9. logging.info(f"pergunta={pergunta!r} fontes={fontes}")
-#  10. return {"resposta": resposta, "fontes": fontes}
-# --- seu código aqui ---
-def responder(pergunta, colecao):
-    resultados = buscar_chroma(pergunta, colecao)
+# Mudanças em relação ao seu responder:
+#   1. resultados = buscar_chroma(pergunta, colecao, categoria=categoria)   # k já é K_BUSCA
+#   2. resultados = filtrar_por_score(resultados, SCORE_MINIMO)
+#   3. resultados = remover_repetidos(resultados)
+#   4. resultados = resultados[:TOP_FINAL]
+#   5. if not resultados:                                                   # funil vazio → não chama o LLM
+#   6.     logging.warning(f"sem contexto para {pergunta!r}")
+#   7.     return {"resposta": "Não encontrei essa informação.", "fontes": []}
+#   8. ...daqui pra baixo igual ao seu (contexto, messages, chamar_llm, fontes, return)
+# --- seu código aqui (substitua a versão antiga) ---
+def responder(pergunta, colecao, categoria=None):
+    resultados = buscar_chroma(pergunta, colecao, categoria=categoria)
+    resultados = filtrar_por_score(resultados, SCORE_MINIMO)
+    resultados = remover_repetidos(resultados)
+    resultados = resultados[:TOP_FINAL]
+    if not resultados:
+        logging.warning(f"sem contexto para {pergunta!r}")
+        return {"resposta": "Não encontrei essa informação.", "fontes": []}
     contexto = montar_contexto(resultados)
     mensagem_user = f"Contexto:\n{contexto}\n\nPergunta: {pergunta}"
     messages = [{"role": "system", "content": SISTEMA},
@@ -166,4 +232,4 @@ def responder(pergunta, colecao):
         if r["fonte"] not in fontes:
             fontes.append(r["fonte"])
     logging.info(f"pergunta={pergunta!r} fontes={fontes}")
-    return {"resposta": resposta, "fontes": fontes}                    
+    return {"resposta": resposta, "fontes": fontes}    
