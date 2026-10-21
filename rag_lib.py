@@ -232,4 +232,98 @@ def responder(pergunta, colecao, categoria=None):
         if r["fonte"] not in fontes:
             fontes.append(r["fonte"])
     logging.info(f"pergunta={pergunta!r} fontes={fontes}")
-    return {"resposta": resposta, "fontes": fontes}    
+    return {"resposta": resposta, "fontes": fontes}
+
+
+# #####################################################################
+# v3 — DIA 40: guardrails + rotas (automático / revisão / recusa)
+# #####################################################################
+# O main.py passa a chamar `atender` em vez de `responder`. O responder acima
+# continua aí (não apague — ele documenta a v2), mas ninguém chama mais ele.
+#
+#   pergunta → [checar_entrada] → funil → [decidir_rota] → recusa
+#                                                        → automático (LLM responde)
+#                                                        → revisão (LLM rascunha → fila → humano aprova)
+
+from guardrails import checar_entrada
+from fila import enfileirar
+
+# Mock e real têm escalas de score diferentes (Dia 32/39) — padrão diferente por modo.
+LIMIAR_AUTO = float(os.getenv("LIMIAR_AUTO", "0.89" if USAR_MOCK else "0.55"))
+
+
+# ─────────────────────────────────────────────
+# PRONTO — o funil e o caminho feliz do seu responder, separados em 2 peças
+# (é o mesmo código do seu responder, só que reutilizável por atender e pelo avaliar_respostas)
+# ─────────────────────────────────────────────
+def funil(pergunta, colecao, categoria=None):
+    resultados = buscar_chroma(pergunta, colecao, categoria=categoria)
+    resultados = filtrar_por_score(resultados, SCORE_MINIMO)
+    resultados = remover_repetidos(resultados)
+    return resultados[:TOP_FINAL]
+
+
+def gerar_resposta(pergunta, resultados):
+    """Devolve DUAS coisas (tupla, Dia 36): o texto da resposta e a lista de fontes sem repetição."""
+    contexto = montar_contexto(resultados)
+    messages = [{"role": "system", "content": SISTEMA},
+                {"role": "user", "content": f"Contexto:\n{contexto}\n\nPergunta: {pergunta}"}]
+    resposta = chamar_llm(messages)
+    fontes = []
+    for r in resultados:
+        if r["fonte"] not in fontes:
+            fontes.append(r["fonte"])
+    return resposta, fontes
+
+
+# =====================================================================
+# LACUNA L — def decidir_rota(resultados)   [COLE do dia39_human_in_the_loop.py, SEM mudar]
+# =====================================================================
+# --- seu código aqui ---
+def decidir_rota(resultados):
+    if not resultados:
+        return "recusa"
+    if resultados[0]["score"] >= LIMIAR_AUTO:
+        return "automatico"
+    return "revisao"
+
+
+# =====================================================================
+# LACUNA M — def atender(pergunta, colecao, categoria=None)   [NOVO — junta os Dias 38 e 39]
+# =====================================================================
+# Devolve SEMPRE um dict com 3 chaves: "resposta", "fontes", "rota".
+# Passos (um por linha — escreva todos, na ordem):
+#   1. entrada = checar_entrada(pergunta)
+#   2. if not entrada["permitido"]:
+#   3.     return {"resposta": "Não posso processar essa pergunta.", "fontes": [], "rota": "bloqueado"}
+#   4. pergunta = entrada["pergunta_limpa"]                       # daqui pra frente, SÓ a versão sem PII
+#   5. resultados = funil(pergunta, colecao, categoria=categoria)
+#   6. rota = decidir_rota(resultados)
+#   7. if rota == "recusa":
+#   8.     return {"resposta": "Não encontrei essa informação.", "fontes": [], "rota": rota}
+#   9. resposta, fontes = gerar_resposta(pergunta, resultados)    # desempacota a tupla
+#  10. if rota == "automatico":
+#  11.     return {"resposta": resposta, "fontes": fontes, "rota": rota}
+#  12. id_fila = enfileirar(pergunta, resposta, fontes, resultados[0]["score"])
+#  13. logging.info(f"enviado pra revisao: #{id_fila} score={resultados[0]['score']:.2f}")
+#  14. return {"resposta": f"Sua pergunta foi encaminhada a um especialista. Protocolo #{id_fila}.",
+#              "fontes": [], "rota": rota}
+# Confira no fim: são QUATRO returns, um por rota (bloqueado, recusa, automatico, revisao).
+# --- seu código aqui ---
+def atender(pergunta, colecao, categoria=None):
+    entrada = checar_entrada(pergunta)
+    if not entrada["permitido"]:
+        return {"resposta": "Não posso processar essa pergunta.", "fontes": [], "rota": "bloqueado"}
+    pergunta = entrada["pergunta_limpa"]
+    resultados = funil(pergunta, colecao, categoria=categoria)
+    rota = decidir_rota(resultados)
+    if rota == "recusa":
+        return {"resposta": "Não encontrei essa informação.", "fontes": [], "rota": rota}
+    resposta, fontes = gerar_resposta(pergunta, resultados)
+    if rota == "automatico":
+        return {"resposta": resposta, "fontes": fontes, "rota": rota}
+    id_fila = enfileirar(pergunta, resposta, fontes, resultados[0]["score"])
+    logging.info(f"enviado pra revisao: #{id_fila} score={resultados[0]['score']:.2f}")
+    return {"resposta": f"Sua pergunta foi encaminhada a um especialista. Protocolo #{id_fila}.",
+            "fontes": [], "rota": rota}
+
