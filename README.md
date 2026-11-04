@@ -180,6 +180,43 @@ docker run --rm -v "${PWD}:/app" -e USAR_MOCK=false -e OPENAI_API_KEY=$env:OPENA
 
 Two findings came from disagreements while building this. An early golden-set entry required a fact the question did not ask for, so the rubric failed a correct answer. The first version of the judge penalised correct refusals, and an explicit refusal rule in the judge prompt fixed it. Both graders need checking, not only the model.
 
+## Observability
+
+The API exposes Prometheus metrics at `GET /metrics`, and `docker compose` brings up the API, Prometheus and Grafana together, with the datasource and dashboard provisioned from files (no manual setup).
+
+```powershell
+docker compose up --build
+python gerar_trafego.py 0     # optional: continuous test traffic, Ctrl+C to stop
+```
+
+| Service | URL |
+|---------|-----|
+| API docs | http://127.0.0.1:8000/docs |
+| Prometheus | http://127.0.0.1:9090 |
+| Grafana dashboard | http://127.0.0.1:3000 → Dashboards → RAG Docs Assistant |
+
+All ports are bound to `127.0.0.1`, so the stack is only reachable from the local machine.
+
+Metrics exposed:
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `rag_perguntas_total` | counter | `rota` | questions handled, by route (automatico, revisao, recusa, bloqueado) |
+| `rag_latencia_segundos` | histogram | `rota` | time to handle a question |
+| `rag_fila_pendentes` | gauge | — | pending items in the human review queue, read from the queue file at scrape time so it survives restarts |
+
+Dashboard panels and their PromQL:
+
+| Panel | Query |
+|-------|-------|
+| API up | `up{job='rag-api'}` |
+| Share going to human review | `sum(rate(rag_perguntas_total{rota='revisao'}[1m])) / sum(rate(rag_perguntas_total[1m]))` |
+| Review queue | `rag_fila_pendentes` |
+| Questions per second, by route | `sum by (rota) (rate(rag_perguntas_total[1m]))` |
+| p95 latency, by route | `histogram_quantile(0.95, sum by (le, rota) (rate(rag_latencia_segundos_bucket[1m])))` |
+
+In mock mode, `MOCK_LATENCIA=true` (set by the compose file) makes the mock LLM sleep 0.3–2.5 s, so latency panels look like a real deployment. With that setting, about 70% of mock traffic goes to human review and the p95 of LLM-backed routes is around 2.8 s, while blocked requests stay under 50 ms.
+
 ## Tests
 
 ```powershell

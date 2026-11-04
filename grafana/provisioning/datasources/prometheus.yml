@@ -1,0 +1,21 @@
+# =====================================================================
+# Fonte de dados do Grafana, provisionada em ARQUIVO (Dia 45)
+# =====================================================================
+# Em vez de entrar no Grafana e clicar em "Add data source", o Grafana lê esta
+# pasta ao subir e cria a fonte sozinho. Resultado: qualquer pessoa que clonar o
+# repo e rodar `docker compose up` ganha exatamente o mesmo Grafana. Zero clique.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus              # id FIXO: é por ele que o dashboard JSON encontra esta fonte
+    type: prometheus
+    access: proxy                # quem consulta o Prometheus é o SERVIDOR do Grafana, não o seu navegador
+    isDefault: true
+    # >>> LACUNA W: o endereço do Prometheus VISTO DE DENTRO da rede do compose.
+    #     É a mesma pegadinha da LACUNA V do Dia 43, agora do Grafana pro Prometheus:
+    #     protocolo + nome do serviço + porta de dentro. Formato: http://host:porta
+    #     (Por causa do access: proxy, quem faz a chamada é o container do Grafana —
+    #      por isso 127.0.0.1 NÃO funciona aqui, mesmo você abrindo o Grafana no navegador do PC.)
+    url: http://prometheus:9090

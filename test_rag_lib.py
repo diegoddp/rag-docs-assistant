@@ -112,3 +112,38 @@ def test_mascara_cpf_e_deixa_passar():
     assert r["permitido"] is True 
     assert "[CPF]" in r["pergunta_limpa"]
     assert "123.456.789-00" not in r["pergunta_limpa"]
+
+
+# #####################################################################
+# DIA 42: métricas (prometheus_client é Python puro, roda no PC)
+# #####################################################################
+from prometheus_client import REGISTRY
+from metricas import registrar_pergunta
+
+
+# PRONTO — o Counter sobe 1 por chamada, na fatia da rota certa.
+# REGISTRY.get_sample_value lê o número atual de uma série (nome + labels).
+# Como o Counter é GLOBAL e outros testes podem ter mexido, comparamos ANTES x DEPOIS.
+def test_registrar_pergunta_incrementa_counter():
+    antes = REGISTRY.get_sample_value("rag_perguntas_total", {"rota": "teste_a"}) or 0
+    registrar_pergunta("teste_a", 0.1)
+    registrar_pergunta("teste_a", 0.2)
+    depois = REGISTRY.get_sample_value("rag_perguntas_total", {"rota": "teste_a"})
+    assert depois - antes == 2
+
+
+# EXERCÍCIO — escreva 1 teste:  def test_latencia_cai_no_bucket_certo()
+#   Uma pergunta de 0.3 s tem que contar no bucket le="0.5" mas NÃO no le="0.05".
+#   Passos:
+#     1. rotulo = "teste_b"
+#     2. registrar_pergunta(rotulo, 0.3)
+#     3. assert REGISTRY.get_sample_value("rag_latencia_segundos_bucket", {"rota": rotulo, "le": "0.5"}) == 1
+#     4. assert REGISTRY.get_sample_value("rag_latencia_segundos_bucket", {"rota": rotulo, "le": "0.05"}) == 0
+#   (rota nova "teste_b" só pra este teste → começa em zero, não precisa do antes/depois)
+# --- seu código aqui ---
+def test_latencia_cai_no_bucket_certo():
+    rotulo = "teste_b"
+    registrar_pergunta(rotulo, 0.3)
+    assert REGISTRY.get_sample_value("rag_latencia_segundos_bucket", {"rota": rotulo, "le": "0.5"}) == 1
+    assert REGISTRY.get_sample_value("rag_latencia_segundos_bucket", {"rota": rotulo, "le": "0.05"}) == 0
+    

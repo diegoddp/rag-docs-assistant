@@ -3,3 +3,4 @@ uvicorn
 openai
 chromadb
 pytest
+prometheus-client

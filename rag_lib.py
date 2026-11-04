@@ -12,6 +12,8 @@
 
 import os
 import math
+import time
+import random
 import logging
 
 USAR_MOCK = os.getenv("USAR_MOCK", "true").lower() == "true"
@@ -179,6 +181,11 @@ SISTEMA = (
 
 
 def _chat_mock(messages):
+    # Dia 44: no mock o "LLM" responde em microssegundos, e o p95 sairia sem graça.
+    # Com MOCK_LATENCIA=true ele finge o tempo de uma chamada real (0.3 a 2.5 s).
+    # Padrão false → os testes e os scripts de avaliação continuam instantâneos.
+    if os.getenv("MOCK_LATENCIA", "false").lower() == "true":
+        time.sleep(random.uniform(0.3, 2.5))
     user = messages[-1]["content"]
     primeira_linha = user.split("\n")[1] if "\n" in user else user
     return f"[MOCK] Com base no contexto: {primeira_linha[:70]}..."

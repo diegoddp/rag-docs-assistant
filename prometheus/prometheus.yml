@@ -1,0 +1,21 @@
+# =====================================================================
+# prometheus.yml — O QUE o Prometheus visita, e de quanto em quanto tempo (Dia 43)
+# =====================================================================
+# O Prometheus é PULL: ele vai até a sua API e lê /metrics a cada scrape_interval.
+# A API não "envia" nada — só deixa o /metrics disponível (o que você fez ontem).
+# Contraste com o New Relic/Azure Monitor que você usa: lá é um agente que EMPURRA
+# (push). Pull tem uma vantagem operacional enorme: se o alvo cair, o Prometheus
+# percebe sozinho (a métrica `up` vira 0) — vai ver isso no exercício.
+
+global:
+  scrape_interval: 15s          # de quanto em quanto tempo visita cada alvo
+
+scrape_configs:
+  - job_name: rag-api           # vira o label job="rag-api" em TODA métrica coletada daqui
+    metrics_path: /metrics      # o padrão já é /metrics; deixei explícito pra você ver
+    static_configs:
+      # >>> LACUNA V: o endereço da API VISTO DE DENTRO da rede do compose.
+      #     Formato "host:porta". O host é o NOME do serviço lá no docker-compose.yml,
+      #     e a porta é a de DENTRO do container (a do uvicorn), não a do seu PC.
+      #     (Releia o bloco "A REDE" no topo do docker-compose.yml antes de preencher.)
+      - targets: ["api:8000"]

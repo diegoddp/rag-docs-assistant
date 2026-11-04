@@ -6,11 +6,14 @@
 #   docker run --rm -p 8000:8000 -v "${PWD}/chroma_db:/app/chroma_db" rag-docs
 #   -> http://127.0.0.1:8000/docs
 
+import time
 import logging
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from rag_lib import carregar_documentos, chunkar_documentos, criar_colecao, indexar_chroma, atender, USAR_MOCK
 from fila import ler_fila, aprovar
+from metricas import registrar_pergunta
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -55,11 +58,33 @@ def raiz():
             "fila_pendentes": pendentes, "docs": "/docs"}
 
 
-# >>> LACUNA N2: troque  responder  por  atender  na chamada abaixo (e no import lá em
-#     cima ele já está trocado). Mesmos argumentos.
+# >>> LACUNA S (Dia 42): cronometrar e registrar cada pergunta. A rota passa de 1 linha pra 4:
+#         inicio = time.perf_counter()                                   # relógio de alta precisão, em segundos
+#         r = atender(body.pergunta, colecao, categoria=body.categoria)  # o que já estava aqui, agora guardado em r
+#         registrar_pergunta(r["rota"], time.perf_counter() - inicio)    # duração = agora − início
+#         return r
+#     Repare: a rota (que vem DENTRO de r) é que vira o label. Por isso o atender
+#     tinha que devolver a rota no Dia 40 — a métrica depende disso.
+
 @app.post("/perguntar", response_model=Resposta)
 def perguntar(body: Pergunta):
-    return atender(body.pergunta, colecao, categoria=body.categoria)
+    inicio = time.perf_counter()
+    r = atender(body.pergunta, colecao, categoria=body.categoria)
+    registrar_pergunta(r["rota"], time.perf_counter() - inicio)
+    return r
+
+# >>> LACUNA T (Dia 42): a rota que o Prometheus visita.
+#     - decorador:  @app.get("/metrics")
+#     - função:     def metrics():
+#     - corpo:      return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+#     (Response = devolver o texto CRU, sem o FastAPI virar JSON. O Prometheus lê
+#      texto no formato que você viu no Dia 41, não JSON. CONTENT_TYPE_LATEST é o
+#      cabeçalho que diz "isto é texto de métricas, versão X".)
+# --- seu código aqui (Dia 42) ---
+@app.get("/metrics")
+def metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    
 
 
 # PRONTO — o atendente consulta a fila

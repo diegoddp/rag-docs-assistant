@@ -1,0 +1,64 @@
+# =====================================================================
+# docker-compose.yml — a API + o Prometheus subindo juntos (Dia 43)
+# =====================================================================
+# Subir:   docker compose up --build        (Ctrl+C derruba os dois)
+# Real:    $env:USAR_MOCK="false" ; docker compose up --build
+#          (o compose lê as variáveis do SEU terminal com ${...} — a chave nunca vai pro arquivo)
+#
+# Por que compose: até ontem era 1 container e 1 `docker run` comprido. Agora são 2
+# (e amanhã 3, com o Grafana). O compose é o "docker run de vários, escrito num
+# arquivo": versionado no Git, igual pra qualquer pessoa que clonar o repo.
+# Pra você que vem de K8s: cada `service` aqui é um Deployment+Service de um pod só.
+#
+# A REDE: o compose cria uma rede interna e cada serviço vira um NOME na rede.
+# Dentro dela, o Prometheus acha a API pelo nome "api", não por 127.0.0.1 —
+# dentro do container do Prometheus, 127.0.0.1 é ELE MESMO (Dia 20, o mesmo motivo
+# do --host 0.0.0.0). Igual o DNS de Service no Kubernetes.
+
+services:
+  api:
+    build: .
+    image: rag-docs
+    ports:
+      - "127.0.0.1:8000:8000"     # 127.0.0.1 na frente = porta presa ao SEU notebook, invisível pra rede da empresa
+    volumes:
+      - ./chroma_db:/app/chroma_db
+    environment:
+      USAR_MOCK: "${USAR_MOCK:-true}"            # ${VAR:-padrão} = usa a do terminal, ou "true" se não houver
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      MOCK_LATENCIA: "${MOCK_LATENCIA:-true}"     # Dia 44: no compose o mock finge a latência de um LLM real
+
+  # >>> LACUNA U: o serviço do Prometheus. Preencha os 3 ___ (o resto está pronto).
+  #     - image:   prom/prometheus:v3.5.0          (versão FIXA, nunca latest — reprodutível)
+  #     - ports:   a UI do Prometheus usa a 9090 → "127.0.0.1:9090:9090"
+  #                (o 127.0.0.1 na frente prende a porta ao seu notebook, igual a da api acima)
+  #     - volumes: o arquivo de config do SEU disco, montado onde o Prometheus procura:
+  #                ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #                (:ro = read-only — o container lê, não altera)
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - api
+
+  # >>> LACUNA Y (Dia 45): o serviço do Grafana. Preencha os 3 ___ (o resto está pronto).
+  #     - image:   grafana/grafana:12.1.0          (versão fixa, de novo)
+  #     - ports:   a UI do Grafana usa a 3000, presa no seu notebook → "127.0.0.1:3000:3000"
+  #     - o 1º volume: a pasta de PROVISIONAMENTO do seu disco, onde o Grafana procura:
+  #                ./grafana/provisioning:/etc/grafana/provisioning:ro
+  #       (o 2º volume, o dos dashboards, já está pronto logo abaixo dele)
+  grafana:
+    image: grafana/grafana:12.1.0
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"         # abre o Grafana sem login, só pra ver (laboratório local)
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"      # quem entra sem login só OLHA; pra editar: admin / admin
+    depends_on:
+      - prometheus

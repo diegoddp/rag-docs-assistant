@@ -1,0 +1,12 @@
+# =====================================================================
+# Diz ao Grafana: "carregue os dashboards JSON desta pasta" (Dia 45) — PRONTO
+# =====================================================================
+apiVersion: 1
+
+providers:
+  - name: rag-docs
+    folder: RAG Docs Assistant           # pasta onde o dashboard aparece no menu do Grafana
+    type: file
+    disableDeletion: true                # ninguém apaga pela UI: a fonte da verdade é o arquivo
+    options:
+      path: /var/lib/grafana/dashboards  # onde o compose monta a pasta grafana/dashboards do seu disco
